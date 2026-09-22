@@ -48,6 +48,21 @@ def save_company(company):
     path.write_text(json.dumps(company, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def delete_company(company):
+    name = sanitize_company_name(company.get("name"))
+    if not name:
+        raise ValueError("Company name is required.")
+    for path in sorted(COMPANIES_DIR.glob("*.json")):
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(existing, dict) and sanitize_company_name(existing.get("name")) == name:
+            path.unlink(missing_ok=True)
+            return
+    raise FileNotFoundError(f"Company '{name}' not found.")
+
+
 def load_item_list():
     try:
         items = json.loads(ITEM_LIST_PATH.read_text(encoding="utf-8"))
@@ -541,34 +556,6 @@ def reset_form():
 if st.session_state.screen == "home":
     st.title("Quotation Generator")
     companies = load_companies()
-    item_list = load_item_list()
-
-    with st.expander("Item list"):
-        item_table = pd.DataFrame(item_list, columns=["Item", "Description", "Unit"])
-        edited_items = st.data_editor(
-            item_table,
-            hide_index=True,
-            width="stretch",
-            num_rows="dynamic",
-            column_config={
-                "Item": st.column_config.TextColumn("Item", width="medium"),
-                "Description": st.column_config.TextColumn("Description", width="large"),
-                "Unit": st.column_config.TextColumn("Unit / price", width="small"),
-            },
-            key="item_list_editor",
-        )
-        if st.button("Save item list"):
-            saved_items = []
-            for record in edited_items.to_dict("records"):
-                item_name = str(record.get("Item", "") or "").strip()
-                if item_name:
-                    saved_items.append({
-                        "Item": item_name,
-                        "Description": str(record.get("Description", "") or "").strip(),
-                        "Unit": str(record.get("Unit", "") or "").strip(),
-                    })
-            save_item_list(saved_items)
-            st.success("Item list saved.")
 
     if companies:
         st.subheader("Select a company")
@@ -576,7 +563,7 @@ if st.session_state.screen == "home":
         selected_index = st.radio("Companies", labels, index=0, label_visibility="collapsed")
         selected_company = companies[labels.index(selected_index)]
 
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4 = st.columns(4)
         with col1:
             if st.button("Continue", type="primary"):
                 st.session_state.selected_company = selected_company
@@ -591,6 +578,16 @@ if st.session_state.screen == "home":
                 st.session_state.edit_company = selected_company
                 st.session_state.screen = "edit_company"
                 st.rerun()
+        with col4:
+            if st.button("Delete company", type="secondary"):
+                try:
+                    delete_company(selected_company)
+                    st.session_state.pop("selected_company", None)
+                    st.session_state.pop("edit_company", None)
+                    st.success(f"Deleted company: {company_label(selected_company)}")
+                    st.rerun()
+                except (FileNotFoundError, ValueError) as exc:
+                    st.error(str(exc))
     else:
         st.info("No company has been created yet.")
         if st.button("Create new company", type="primary"):
@@ -607,6 +604,10 @@ elif st.session_state.screen == "create_company":
         company_name = st.text_input("Company name")
         company_address = st.text_area("Address")
         attention_name = st.text_input("Attention name")
+        company_quotation_title = st.text_area(
+            "Default quotation title",
+            help="This will be used as the starting title when creating a quotation for this company.",
+        )
         submitted = st.form_submit_button("Save company", type="primary")
 
     if submitted:
@@ -617,6 +618,7 @@ elif st.session_state.screen == "create_company":
                 "name": company_name.strip(),
                 "address": company_address.strip(),
                 "attn": attention_name.strip(),
+                "quotation_title": company_quotation_title.strip(),
             }
             save_company(new_company)
             st.session_state.selected_company = new_company
@@ -634,6 +636,11 @@ elif st.session_state.screen == "edit_company":
         company_name = st.text_input("Company name", value=str(company.get("name", "")))
         company_address = st.text_area("Address", value=str(company.get("address", "")))
         attention_name = st.text_input("Attention name", value=str(company.get("attn", "")))
+        company_quotation_title = st.text_area(
+            "Default quotation title",
+            value=str(company.get("quotation_title", "")),
+            help="This will be used as the starting title when creating a quotation for this company.",
+        )
         submitted = st.form_submit_button("Save changes", type="primary")
 
     if submitted:
@@ -644,6 +651,7 @@ elif st.session_state.screen == "edit_company":
                 "name": company_name.strip(),
                 "address": company_address.strip(),
                 "attn": attention_name.strip(),
+                "quotation_title": company_quotation_title.strip(),
             }
             save_company(updated_company)
             st.session_state.selected_company = updated_company
@@ -664,10 +672,10 @@ elif st.session_state.screen == "report":
     if "reference_suffix" not in st.session_state:
         st.session_state.reference_suffix = draft.get("reference_suffix", "01")
     if "quotation_title" not in st.session_state:
-        st.session_state.quotation_title = draft.get(
-            "quotation_title",
-            "MAINTENANCE SERVICES OF 11KV SUBSTATION ELECTRICAL EQUIPMENT AT TOP GLOVE SDN BHD (F 24)",
-        )
+        default_title = str(company.get("quotation_title", "") or "").strip()
+        if not default_title:
+            default_title = "MAINTENANCE SERVICES OF 11KV SUBSTATION ELECTRICAL EQUIPMENT AT TOP GLOVE SDN BHD (F 24)"
+        st.session_state.quotation_title = draft.get("quotation_title", default_title)
 
     report_date = st.date_input("Date", key="report_date")
     reference_suffix = st.text_input("Reference number", key="reference_suffix")
