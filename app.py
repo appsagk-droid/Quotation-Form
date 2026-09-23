@@ -2,7 +2,7 @@ import io
 import base64
 import json
 import re
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 from datetime import date
@@ -30,6 +30,23 @@ def slugify(value):
 
 def sanitize_company_name(value):
     return str(value or "").strip()
+
+
+def normalize_company(company):
+    if not isinstance(company, dict):
+        return None
+    name = sanitize_company_name(company.get("name") or company.get("klien"))
+    if not name:
+        return None
+    normalized = dict(company)
+    normalized["name"] = name
+    normalized["address"] = str(
+        company.get("address") or company.get("alamat") or ""
+    ).strip()
+    normalized["attn"] = str(
+        company.get("attn") or company.get("attention") or ""
+    ).strip()
+    return normalized
 
 
 def github_settings():
@@ -80,8 +97,8 @@ def github_companies(settings):
             continue
         file_data = github_request("GET", entry["path"], settings)
         content = base64.b64decode(file_data.get("content", "")).decode("utf-8")
-        company = json.loads(content)
-        if isinstance(company, dict) and company.get("name"):
+        company = normalize_company(json.loads(content))
+        if company:
             companies.append(company)
     return companies
 
@@ -118,7 +135,8 @@ def load_companies():
             company = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if isinstance(company, dict) and company.get("name"):
+        company = normalize_company(company)
+        if company:
             companies.append(company)
     return sorted(companies, key=lambda item: company_label(item).casefold())
 
@@ -660,6 +678,12 @@ def reset_form():
 if st.session_state.screen == "home":
     st.title("Quotation Generator")
     companies = load_companies()
+    if not github_settings():
+        st.warning(
+            "GitHub persistence is not configured. Companies added now are stored "
+            "only on this Streamlit instance. Add GITHUB_TOKEN and "
+            "GITHUB_REPOSITORY in Streamlit secrets."
+        )
 
     if companies:
         st.subheader("Select a company")
@@ -724,10 +748,14 @@ elif st.session_state.screen == "create_company":
                 "attn": attention_name.strip(),
                 "quotation_title": company_quotation_title.strip(),
             }
-            save_company(new_company)
-            st.session_state.selected_company = new_company
-            st.session_state.screen = "report"
-            st.rerun()
+            try:
+                save_company(new_company)
+            except (HTTPError, URLError, OSError, ValueError) as exc:
+                st.error(f"Could not save company to GitHub: {exc}")
+            else:
+                st.session_state.selected_company = new_company
+                st.session_state.screen = "report"
+                st.rerun()
 
 elif st.session_state.screen == "edit_company":
     company = st.session_state.edit_company
@@ -757,10 +785,14 @@ elif st.session_state.screen == "edit_company":
                 "attn": attention_name.strip(),
                 "quotation_title": company_quotation_title.strip(),
             }
-            save_company(updated_company)
-            st.session_state.selected_company = updated_company
-            st.session_state.screen = "report"
-            st.rerun()
+            try:
+                save_company(updated_company)
+            except (HTTPError, URLError, OSError, ValueError) as exc:
+                st.error(f"Could not save company to GitHub: {exc}")
+            else:
+                st.session_state.selected_company = updated_company
+                st.session_state.screen = "report"
+                st.rerun()
 
 elif st.session_state.screen == "report":
     company = st.session_state.selected_company
