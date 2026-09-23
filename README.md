@@ -7,41 +7,18 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-The app uses `sample.docx` as its built-in template. For local development, company profiles are saved as JSON files in `companies/`.
+The app uses `sample.docx` as its built-in template. Ensure this file is committed to GitHub; it is required by the deployed app.
 
-## Persistent company storage on Streamlit Community Cloud
-
-The filesystem of a deployed Streamlit app is temporary. To retain company profiles across app restarts, create a Supabase project and run this SQL in its SQL editor:
-
-```sql
-create table companies (
-	name text primary key,
-	data jsonb not null
-);
-```
-
-If you use the `anon` key, enable access with these policies (the `service_role` key bypasses RLS):
-
-```sql
-alter table companies enable row level security;
-create policy "allow company reads" on companies for select to anon using (true);
-create policy "allow company writes" on companies for insert to anon with check (true);
-create policy "allow company updates" on companies for update to anon using (true) with check (true);
-create policy "allow company deletes" on companies for delete to anon using (true);
-```
-
-Also confirm the table is named exactly `companies` and has exactly these columns: `name` (text primary key) and `data` (jsonb).
-
-In the Streamlit app settings, add these secrets:
+For persistent company profiles on Streamlit Community Cloud, add these secrets:
 
 ```toml
-SUPABASE_URL = "https://your-project.supabase.co"
-SUPABASE_KEY = "your-server-side-key"
+GITHUB_TOKEN = "github_pat_..."
+GITHUB_REPOSITORY = "your-user/your-repository"
+GITHUB_BRANCH = "main"
+GITHUB_DATA_DIR = "companies"
 ```
 
-`SUPABASE_URL` must be the Supabase Project URL from **Project Settings -> API**. Do not use the Supabase dashboard URL. `SUPABASE_KEY` should be the server-side `service_role` key from that same page. After changing secrets, reboot the Streamlit app from **Manage app**.
-
-Use a server-side Supabase key because this app does not have user authentication. Keep the key in Streamlit Secrets and never commit it to the repository. Once both secrets are present, the app reads and writes company profiles in Supabase; without them it continues to use local JSON files.
+The token needs repository **Contents: Read and write** permission. The app commits each company create, edit, and delete directly to the configured branch. Without these secrets it uses local JSON files, which are temporary on Streamlit Cloud.
 
 DOCX downloads work with the Python dependencies in `requirements.txt`. PDF downloads convert the generated DOCX with LibreOffice so the PDF keeps the same format as the Word document.
 

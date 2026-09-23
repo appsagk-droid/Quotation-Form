@@ -1,6 +1,10 @@
 import io
+import base64
 import json
 import re
+from urllib.error import HTTPError
+from urllib.parse import quote
+from urllib.request import Request, urlopen
 from datetime import date
 from pathlib import Path
 
@@ -28,22 +32,105 @@ def sanitize_company_name(value):
     return str(value or "").strip()
 
 
-def load_companies():
+def github_settings():
+    try:
+        token = str(st.secrets.get("GITHUB_TOKEN", "")).strip()
+        repository = str(st.secrets.get("GITHUB_REPOSITORY", "")).strip()
+        branch = str(st.secrets.get("GITHUB_BRANCH", "main")).strip() or "main"
+        data_dir = str(st.secrets.get("GITHUB_DATA_DIR", "companies")).strip().strip("/")
+    except Exception:
+        return None
+    if not token or not repository or "/" not in repository:
+        return None
+    return token, repository, branch, data_dir
+
+
+def github_request(method, path, settings, payload=None):
+    token, repository, branch, _ = settings
+    url = f"https://api.github.com/repos/{repository}/contents/{quote(path, safe='/')}"
+    if method == "GET":
+        url += f"?ref={quote(branch)}"
+    body = json.dumps(payload).encode("utf-8") if payload is not None else None
+    request = Request(
+        url,
+        data=body,
+        method=method,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {token}",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "quotation-form-streamlit",
+            **({"Content-Type": "application/json"} if body else {}),
+        },
+    )
+    with urlopen(request, timeout=15) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def github_file_path(settings, filename):
+    return f"{settings[3]}/{filename}"
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def github_companies(settings):
+    listing = github_request("GET", settings[3], settings)
     companies = []
-    for path in sorted(COMPANIES_DIR.glob("*.json")):
+    for entry in listing if isinstance(listing, list) else []:
+        if not entry.get("name", "").endswith(".json"):
+            continue
+        file_data = github_request("GET", entry["path"], settings)
+        content = base64.b64decode(file_data.get("content", "")).decode("utf-8")
+        company = json.loads(content)
+        if isinstance(company, dict) and company.get("name"):
+            companies.append(company)
+    return companies
+
+
+def github_write_company(company, settings):
+    filename = f"{slugify(company.get('name'))}.json"
+    path = github_file_path(settings, filename)
+    payload = {
+        "message": f"Save company: {company.get('name', '').strip()}",
+        "content": base64.b64encode(
+            json.dumps(company, ensure_ascii=False, indent=2).encode("utf-8")
+        ).decode("ascii"),
+        "branch": settings[2],
+    }
+    try:
+        existing = github_request("GET", path, settings)
+    except HTTPError as error:
+        if error.code != 404:
+            raise
+    else:
+        payload["sha"] = existing["sha"]
+    result = github_request("PUT", path, settings, payload)
+    github_companies.clear()
+    return result
+
+
+def load_companies():
+    settings = github_settings()
+    if settings:
+        return sorted(github_companies(settings), key=lambda item: company_label(item).casefold())
+    companies = []
+    for path in COMPANIES_DIR.glob("*.json"):
         try:
             company = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
         if isinstance(company, dict) and company.get("name"):
             companies.append(company)
-    return companies
+    return sorted(companies, key=lambda item: company_label(item).casefold())
 
 
 def save_company(company):
     name = sanitize_company_name(company.get("name"))
     if not name:
         raise ValueError("Company name is required.")
+    settings = github_settings()
+    if settings:
+        github_write_company(company, settings)
+        return
     path = COMPANIES_DIR / f"{slugify(name)}.json"
     path.write_text(json.dumps(company, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -52,7 +139,19 @@ def delete_company(company):
     name = sanitize_company_name(company.get("name"))
     if not name:
         raise ValueError("Company name is required.")
-    for path in sorted(COMPANIES_DIR.glob("*.json")):
+    settings = github_settings()
+    if settings:
+        path = github_file_path(settings, f"{slugify(name)}.json")
+        file_data = github_request("GET", path, settings)
+        github_request(
+            "DELETE",
+            path,
+            settings,
+            {"message": f"Delete company: {name}", "sha": file_data["sha"], "branch": settings[2]},
+        )
+        github_companies.clear()
+        return
+    for path in COMPANIES_DIR.glob("*.json"):
         try:
             existing = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -372,6 +471,11 @@ def set_cell_shading(cell, fill):
 
 
 def generate_docx(company, report_date, categories, reference, quotation_title):
+    if not TEMPLATE_PATH.is_file():
+        raise FileNotFoundError(
+            "The DOCX template is missing. Commit sample.docx to the repository "
+            "and redeploy the Streamlit app."
+        )
     doc = Document(TEMPLATE_PATH)
     for section in doc.sections:
         section.top_margin = Inches(0.18)
